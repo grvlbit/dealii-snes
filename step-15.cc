@@ -14,7 +14,8 @@
  * ---------------------------------------------------------------------
 
  *
- * Author: Sven Wetterauer, University of Heidelberg, 2012
+ * Author : Gunnar Jansen, University of Neuchatel, 2015
+ * based on a the work of: Sven Wetterauer, University of Heidelberg, 2012
  */
 
 
@@ -77,23 +78,16 @@ namespace Step15
 
     void run ();
 
-
   private:
     void setup_system (const bool initial_step);
-
-    void refine_mesh ();
     void set_boundary_values ();
-    double determine_step_length () const;
 
-
-        double compute_residual (PETScWrappers::Vector &present_solution,
-                                 PETScWrappers::Vector &residual) const;
-        void assemble_system (PETScWrappers::Vector &present_solution);
-        void assemble_rhs (PETScWrappers::Vector &present_solution,PETScWrappers::Vector &system_rhs);
+    void assemble_system (PETScWrappers::Vector &present_solution);
+    void assemble_rhs (PETScWrappers::Vector &present_solution,PETScWrappers::Vector &system_rhs);
 
     static PetscErrorCode FormFunction(SNES snes , Vec x, Vec f, void* ctx);
     static PetscErrorCode FormJacobian(SNES snes, Vec x, Mat* jac, Mat* B,
-                                                      MatStructure *flag, void* ctx);
+                                       MatStructure *flag, void* ctx);
 
     Triangulation<dim>   triangulation;
 
@@ -106,8 +100,6 @@ namespace Step15
     PETScWrappers::SparseMatrix system_matrix;
 
     PETScWrappers::Vector       present_solution;
-    PETScWrappers::Vector       residual;
-    PETScWrappers::Vector       newton_update;
     PETScWrappers::Vector       system_rhs;
   };
 
@@ -138,7 +130,7 @@ namespace Step15
      auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<dim>*>(ctx);
      PETScWrappers::Vector x_wrap(x);
      PETScWrappers::Vector f_wrap(f);
-     //p_ctx->compute_residual(x_wrap,f_wrap);
+
      p_ctx->assemble_rhs(x_wrap,f_wrap);
      return 0;
   }
@@ -147,10 +139,11 @@ namespace Step15
   PetscErrorCode MinimalSurfaceProblem<dim>::FormJacobian(SNES snes, Vec x, Mat* jac, Mat* B,
                                                     MatStructure *flag, void* ctx)
   {
-    auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<2>*>(ctx);
-    //PETScWrappers::SparseMatrix jac_wrap(jac);
+    auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<dim>*>(ctx);
+
     PETScWrappers::Vector x_wrap(x);
     p_ctx->assemble_system(x_wrap);
+
     /*
        Assemble matrix
     */
@@ -163,10 +156,6 @@ namespace Step15
     }
     return 0;
   }
-
-
-
-
 
 
 
@@ -194,23 +183,19 @@ namespace Step15
       {
         dof_handler.distribute_dofs (fe);
         present_solution.reinit (dof_handler.n_dofs());
-
-        hanging_node_constraints.clear ();
-        DoFTools::make_hanging_node_constraints (dof_handler,
-                                                 hanging_node_constraints);
-
-        VectorTools::interpolate_boundary_values (dof_handler,
-                                          0,
-                                          ZeroFunction<dim>(),
-                                          hanging_node_constraints);
-        hanging_node_constraints.close ();
       }
 
+    hanging_node_constraints.clear ();
+    DoFTools::make_hanging_node_constraints (dof_handler,
+                                             hanging_node_constraints);
 
+    VectorTools::interpolate_boundary_values (dof_handler,
+                                      0,
+                                      ZeroFunction<dim>(),
+                                      hanging_node_constraints);
+    hanging_node_constraints.close ();
 
-    newton_update.reinit (dof_handler.n_dofs());
     system_rhs.reinit (dof_handler.n_dofs());
-    residual.reinit(dof_handler.n_dofs());
 
     CompressedSparsityPattern c_sparsity(dof_handler.n_dofs());
     DoFTools::make_sparsity_pattern (dof_handler, c_sparsity);
@@ -225,11 +210,9 @@ namespace Step15
   template <int dim>
   void MinimalSurfaceProblem<dim>::assemble_system (PETScWrappers::Vector &present_solution)
   {
-    std::cout << "Assemble "<< std::endl;
     const QGauss<dim>  quadrature_formula(3);
 
     system_matrix = 0;
-    system_rhs = 0;
 
     FEValues<dim> fe_values (fe, quadrature_formula,
                              update_gradients         |
@@ -240,7 +223,6 @@ namespace Step15
     const unsigned int           n_q_points    = quadrature_formula.size();
 
     FullMatrix<double>           cell_matrix (dofs_per_cell, dofs_per_cell);
-    Vector<double>               cell_rhs (dofs_per_cell);
 
     std::vector<Tensor<1, dim> > old_solution_gradients(n_q_points);
 
@@ -252,7 +234,6 @@ namespace Step15
     for (; cell!=endc; ++cell)
       {
         cell_matrix = 0;
-        cell_rhs = 0;
 
         fe_values.reinit (cell);
 
@@ -282,36 +263,26 @@ namespace Step15
                                             )
                                           * fe_values.JxW(q_point));
                   }
-
-                 cell_rhs(i) += (fe_values.shape_grad(i, q_point)
-                                 * coeff
-                                 * old_solution_gradients[q_point]
-                             * fe_values.JxW(q_point));
               }
           }
 
         cell->get_dof_indices (local_dof_indices);
-         hanging_node_constraints
- .distribute_local_to_global (cell_matrix, cell_rhs,
-                              local_dof_indices,
-                              system_matrix, system_rhs);
-      //  hanging_node_constraints
-      //                .distribute_local_to_global (cell_matrix,
-      //                                             local_dof_indices,
-      //                                             system_matrix);
+        hanging_node_constraints
+                     .distribute_local_to_global (cell_matrix,
+                                                  local_dof_indices,
+                                                  system_matrix);
       }
 
 
-system_matrix.compress(VectorOperation::add);
-system_rhs.compress(VectorOperation::add);
+      system_matrix.compress(VectorOperation::add);
 
   }
 
 
   template <int dim>
-  void MinimalSurfaceProblem<dim>::assemble_rhs (PETScWrappers::Vector &present_solution, PETScWrappers::Vector &system_rhs)
+  void MinimalSurfaceProblem<dim>::assemble_rhs(
+    PETScWrappers::Vector &present_solution, PETScWrappers::Vector &system_rhs)
   {
-    //std::cout << "Assemble rhs"<< std::endl;
     const QGauss<dim>  quadrature_formula(3);
 
     system_rhs = 0;
@@ -353,21 +324,23 @@ system_rhs.compress(VectorOperation::add);
 
             for (unsigned int i=0; i<dofs_per_cell; ++i)
               {
-                for (unsigned int j=0; j<dofs_per_cell; ++j)
-                  {
-                    cell_matrix(i, j) += (fe_values.shape_grad(i, q_point)
-                                          * coeff
-                                          * (fe_values.shape_grad(j, q_point)
-                                             -
-                                             coeff * coeff
-                                             * (fe_values.shape_grad(j, q_point)
-                                                *
-                                                old_solution_gradients[q_point])
-                                             * old_solution_gradients[q_point]
-                                            )
-                                          * fe_values.JxW(q_point));
-                  }
-
+                if (hanging_node_constraints.is_inhomogeneously_constrained(local_dof_indices[i]))
+                {
+                  for (unsigned int j=0; j<dofs_per_cell; ++j)
+                    {
+                      cell_matrix(i, j) += (fe_values.shape_grad(i, q_point)
+                                            * coeff
+                                            * (fe_values.shape_grad(j, q_point)
+                                               -
+                                               coeff * coeff
+                                               * (fe_values.shape_grad(j, q_point)
+                                                  *
+                                                  old_solution_gradients[q_point])
+                                               * old_solution_gradients[q_point]
+                                              )
+                                            * fe_values.JxW(q_point));
+                    }
+                }
                 cell_rhs(i) += (fe_values.shape_grad(i, q_point)
                                 * coeff
                                 * old_solution_gradients[q_point]
@@ -377,59 +350,14 @@ system_rhs.compress(VectorOperation::add);
 
         cell->get_dof_indices (local_dof_indices);
         hanging_node_constraints
-.distribute_local_to_global (cell_rhs,
-                             local_dof_indices,
-                             system_rhs, cell_matrix);
+                          .distribute_local_to_global (cell_rhs,
+                                                       local_dof_indices,
+                                                       system_rhs, cell_matrix);
 
-system_rhs.compress(VectorOperation::add);
+        system_rhs.compress(VectorOperation::add);
 
-//    std::cout << system_rhs.l2_norm() << std::endl;
+      }
   }
-}
-
-
-
-  template <int dim>
-  void MinimalSurfaceProblem<dim>::refine_mesh ()
-  {
-    Vector<float> estimated_error_per_cell (triangulation.n_active_cells());
-
-    KellyErrorEstimator<dim>::estimate (dof_handler,
-                                        QGauss<dim-1>(3),
-                                        typename FunctionMap<dim>::type(),
-                                        present_solution,
-                                        estimated_error_per_cell);
-
-    GridRefinement::refine_and_coarsen_fixed_number (triangulation,
-                                                     estimated_error_per_cell,
-                                                     0.3, 0.03);
-
-    triangulation.prepare_coarsening_and_refinement ();
-
-    SolutionTransfer<dim> solution_transfer(dof_handler);
-    solution_transfer.prepare_for_coarsening_and_refinement(present_solution);
-
-    triangulation.execute_coarsening_and_refinement();
-
-    dof_handler.distribute_dofs(fe);
-
-    Vector<double> tmp(dof_handler.n_dofs());
-    solution_transfer.interpolate(present_solution, tmp);
-    present_solution = tmp;
-
-    set_boundary_values ();
-
-    hanging_node_constraints.clear();
-
-    DoFTools::make_hanging_node_constraints(dof_handler,
-                                            hanging_node_constraints);
-    hanging_node_constraints.close();
-
-    hanging_node_constraints.distribute (present_solution);
-
-    setup_system (false);
-  }
-
 
 
 
@@ -450,85 +378,6 @@ system_rhs.compress(VectorOperation::add);
 
 
   template <int dim>
-  double MinimalSurfaceProblem<dim>::compute_residual (PETScWrappers::Vector &present_solution, PETScWrappers::Vector &residual) const
-  {
-    //Vector<double> residual (dof_handler.n_dofs());
-    residual = 0.;
-    residual -= system_rhs;//0.;
-    hanging_node_constraints.distribute (present_solution);
-
-    Vector<double> evaluation_point (dof_handler.n_dofs());
-    evaluation_point = present_solution;
-    //evaluation_point.add (alpha, newton_update);
-
-    const QGauss<dim>  quadrature_formula(3);
-    FEValues<dim> fe_values (fe, quadrature_formula,
-                             update_gradients         |
-                             update_quadrature_points |
-                             update_JxW_values);
-
-    const unsigned int           dofs_per_cell = fe.dofs_per_cell;
-    const unsigned int           n_q_points    = quadrature_formula.size();
-
-    Vector<double>               cell_residual (dofs_per_cell);
-    std::vector<Tensor<1, dim> > gradients(n_q_points);
-
-    std::vector<types::global_dof_index>    local_dof_indices (dofs_per_cell);
-
-    typename DoFHandler<dim>::active_cell_iterator
-    cell = dof_handler.begin_active(),
-    endc = dof_handler.end();
-    for (; cell!=endc; ++cell)
-      {
-        cell_residual = 0;
-        fe_values.reinit (cell);
-
-        fe_values.get_function_gradients (evaluation_point,
-                                          gradients);
-
-
-        for (unsigned int q_point=0; q_point<n_q_points; ++q_point)
-          {
-            const double coeff = 1/std::sqrt(1 +
-                                             gradients[q_point] *
-                                             gradients[q_point]);
-
-            for (unsigned int i = 0; i < dofs_per_cell; ++i)
-              cell_residual(i) -= (fe_values.shape_grad(i, q_point)
-                                   * coeff
-                                   * gradients[q_point]
-                                   * fe_values.JxW(q_point));
-          }
-
-        cell->get_dof_indices (local_dof_indices);
-        for (unsigned int i=0; i<dofs_per_cell; ++i)
-          residual(local_dof_indices[i]) += cell_residual(i);
-      }
-
-    hanging_node_constraints.condense (residual);
-
-    std::vector<bool> boundary_dofs (dof_handler.n_dofs());
-    DoFTools::extract_boundary_dofs (dof_handler,
-                                     ComponentMask(),
-                                     boundary_dofs);
-    for (unsigned int i=0; i<dof_handler.n_dofs(); ++i)
-      if (boundary_dofs[i] == true)
-        residual(i) = 0;
-
-    return residual.l2_norm();
-  }
-
-
-
-
-  template <int dim>
-  double MinimalSurfaceProblem<dim>::determine_step_length() const
-  {
-    return 0.1;
-  }
-
-
-  template <int dim>
   void MinimalSurfaceProblem<dim>::run ()
   {
     unsigned int refinement = 0;
@@ -542,49 +391,32 @@ system_rhs.compress(VectorOperation::add);
     setup_system (true);
     set_boundary_values ();
 
-  // SNES Stuff here
-  SNES snes;
-  KSP ksp;
-  PC pc;
+    // SNES Stuff here
+    SNES snes;
 
-  PetscErrorCode ierr;
+    PetscErrorCode ierr;
 
-  ierr = SNESCreate(MPI_COMM_WORLD, &snes);
+    ierr = SNESCreate(MPI_COMM_WORLD, &snes);
+    ierr = SNESSetFunction(snes, system_rhs, FormFunction, this);
+    ierr = SNESSetJacobian(snes, system_matrix, system_matrix, FormJacobian, this);
+    ierr = SNESSetFromOptions(snes);
 
-  //ierr = SNESSetFunction(snes, residual, FormFunction, this);
-  ierr = SNESSetFunction(snes, system_rhs, FormFunction, this);
+    ierr = SNESSolve(snes, NULL, present_solution);
 
-  ierr = SNESSetJacobian(snes, system_matrix, system_matrix, FormJacobian, this);
-
-  SNESGetKSP(snes,&ksp);
-  KSPGetPC(ksp,&pc);
-  //PCSetType(pc,PCNONE);
-  //KSPSetTolerances(ksp,1.e-4,PETSC_DEFAULT,PETSC_DEFAULT,20);
-  ierr = SNESSetFromOptions(snes);
-//assemble_system();
-  ierr = SNESSolve(snes, NULL, present_solution);
-
-  PetscInt its;
-
-  SNESGetIterationNumber(snes,&its);
-
+    PetscInt its;
+    SNESGetIterationNumber(snes,&its);
     PetscPrintf(MPI_COMM_WORLD,"Number of SNES iterations = %D\n",its);
 
+    ierr = SNESDestroy(&snes);
 
+    DataOut<dim> data_out;
+    data_out.attach_dof_handler (dof_handler);
+    data_out.add_data_vector (present_solution, "solution");
+    data_out.build_patches ();
+    const std::string filename = "solution.vtk";
+    std::ofstream output (filename.c_str());
+    data_out.write_vtk (output);
 
-
-
-      DataOut<dim> data_out;
-
-      data_out.attach_dof_handler (dof_handler);
-      data_out.add_data_vector (present_solution, "solution");
-      //data_out.add_data_vector (newton_update, "update");
-      data_out.build_patches ();
-      const std::string filename = "solution-" +
-                                   Utilities::int_to_string (refinement, 2) +
-                                   ".vtk";
-      std::ofstream output (filename.c_str());
-      data_out.write_vtk (output);
   }
 }
 
