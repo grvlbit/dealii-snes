@@ -77,17 +77,23 @@ namespace Step15
 
     void run ();
 
-    double compute_residual (PETScWrappers::Vector &present_solution,
-                             PETScWrappers::Vector &residual) const;
-    void assemble_system ();
 
   private:
     void setup_system (const bool initial_step);
 
-    void solve ();
     void refine_mesh ();
     void set_boundary_values ();
     double determine_step_length () const;
+
+
+        double compute_residual (PETScWrappers::Vector &present_solution,
+                                 PETScWrappers::Vector &residual) const;
+        void assemble_system (PETScWrappers::Vector &present_solution);
+        void assemble_rhs (PETScWrappers::Vector &present_solution,PETScWrappers::Vector &system_rhs);
+
+    static PetscErrorCode FormFunction(SNES snes , Vec x, Vec f, void* ctx);
+    static PetscErrorCode FormJacobian(SNES snes, Vec x, Mat* jac, Mat* B,
+                                                      MatStructure *flag, void* ctx);
 
     Triangulation<dim>   triangulation;
 
@@ -126,23 +132,35 @@ namespace Step15
   }
 
 
-  //template <int dim>
-  PetscErrorCode FormFunction(SNES snes , Vec x, Vec f, void* ctx)
+  template <int dim>
+  PetscErrorCode MinimalSurfaceProblem<dim>::FormFunction(SNES snes , Vec x, Vec f, void* ctx)
   {
-     auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<2>*>(ctx);
+     auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<dim>*>(ctx);
      PETScWrappers::Vector x_wrap(x);
      PETScWrappers::Vector f_wrap(f);
-     p_ctx->compute_residual(x_wrap,f_wrap);
+     //p_ctx->compute_residual(x_wrap,f_wrap);
+     p_ctx->assemble_rhs(x_wrap,f_wrap);
      return 0;
   }
 
-  //template <int dim>
-  PetscErrorCode FormJacobian(SNES snes, Vec x, Mat* jac, Mat* B,
+  template <int dim>
+  PetscErrorCode MinimalSurfaceProblem<dim>::FormJacobian(SNES snes, Vec x, Mat* jac, Mat* B,
                                                     MatStructure *flag, void* ctx)
   {
     auto p_ctx = reinterpret_cast<MinimalSurfaceProblem<2>*>(ctx);
     //PETScWrappers::SparseMatrix jac_wrap(jac);
-    p_ctx->assemble_system();
+    PETScWrappers::Vector x_wrap(x);
+    p_ctx->assemble_system(x_wrap);
+    /*
+       Assemble matrix
+    */
+    PetscErrorCode ierr;
+    ierr = MatAssemblyBegin(*B,MAT_FINAL_ASSEMBLY);CHKERRQ(ierr);
+    ierr = MatAssemblyEnd(*B,MAT_FINAL_ASSEMBLY);CHKERRQ(ierr);
+    if (jac != B) {
+      ierr = MatAssemblyBegin(*jac,MAT_FINAL_ASSEMBLY);CHKERRQ(ierr);
+      ierr = MatAssemblyEnd(*jac,MAT_FINAL_ASSEMBLY);CHKERRQ(ierr);
+    }
     return 0;
   }
 
@@ -180,6 +198,11 @@ namespace Step15
         hanging_node_constraints.clear ();
         DoFTools::make_hanging_node_constraints (dof_handler,
                                                  hanging_node_constraints);
+
+        VectorTools::interpolate_boundary_values (dof_handler,
+                                          0,
+                                          ZeroFunction<dim>(),
+                                          hanging_node_constraints);
         hanging_node_constraints.close ();
       }
 
@@ -200,8 +223,9 @@ namespace Step15
 
 
   template <int dim>
-  void MinimalSurfaceProblem<dim>::assemble_system ()
+  void MinimalSurfaceProblem<dim>::assemble_system (PETScWrappers::Vector &present_solution)
   {
+    std::cout << "Assemble "<< std::endl;
     const QGauss<dim>  quadrature_formula(3);
 
     system_matrix = 0;
@@ -259,7 +283,92 @@ namespace Step15
                                           * fe_values.JxW(q_point));
                   }
 
-                cell_rhs(i) -= (fe_values.shape_grad(i, q_point)
+                 cell_rhs(i) += (fe_values.shape_grad(i, q_point)
+                                 * coeff
+                                 * old_solution_gradients[q_point]
+                             * fe_values.JxW(q_point));
+              }
+          }
+
+        cell->get_dof_indices (local_dof_indices);
+         hanging_node_constraints
+ .distribute_local_to_global (cell_matrix, cell_rhs,
+                              local_dof_indices,
+                              system_matrix, system_rhs);
+      //  hanging_node_constraints
+      //                .distribute_local_to_global (cell_matrix,
+      //                                             local_dof_indices,
+      //                                             system_matrix);
+      }
+
+
+system_matrix.compress(VectorOperation::add);
+system_rhs.compress(VectorOperation::add);
+
+  }
+
+
+  template <int dim>
+  void MinimalSurfaceProblem<dim>::assemble_rhs (PETScWrappers::Vector &present_solution, PETScWrappers::Vector &system_rhs)
+  {
+    //std::cout << "Assemble rhs"<< std::endl;
+    const QGauss<dim>  quadrature_formula(3);
+
+    system_rhs = 0;
+
+    FEValues<dim> fe_values (fe, quadrature_formula,
+                             update_gradients         |
+                             update_quadrature_points |
+                             update_JxW_values);
+
+    const unsigned int           dofs_per_cell = fe.dofs_per_cell;
+    const unsigned int           n_q_points    = quadrature_formula.size();
+
+    FullMatrix<double>           cell_matrix (dofs_per_cell, dofs_per_cell);
+    Vector<double>               cell_rhs (dofs_per_cell);
+
+    std::vector<Tensor<1, dim> > old_solution_gradients(n_q_points);
+
+    std::vector<types::global_dof_index>    local_dof_indices (dofs_per_cell);
+
+    typename DoFHandler<dim>::active_cell_iterator
+    cell = dof_handler.begin_active(),
+    endc = dof_handler.end();
+    for (; cell!=endc; ++cell)
+      {
+        cell_matrix = 0;
+        cell_rhs = 0;
+
+        fe_values.reinit (cell);
+
+        fe_values.get_function_gradients(present_solution,
+                                         old_solution_gradients);
+
+        for (unsigned int q_point = 0; q_point < n_q_points; ++q_point)
+          {
+            const double coeff
+              = 1.0 / std::sqrt(1 +
+                                old_solution_gradients[q_point] *
+                                old_solution_gradients[q_point]);
+
+            for (unsigned int i=0; i<dofs_per_cell; ++i)
+              {
+                for (unsigned int j=0; j<dofs_per_cell; ++j)
+                  {
+                    cell_matrix(i, j) += (fe_values.shape_grad(i, q_point)
+                                          * coeff
+                                          * (fe_values.shape_grad(j, q_point)
+                                             -
+                                             coeff * coeff
+                                             * (fe_values.shape_grad(j, q_point)
+                                                *
+                                                old_solution_gradients[q_point])
+                                             * old_solution_gradients[q_point]
+                                            )
+                                          * fe_values.JxW(q_point));
+                  }
+
+                cell_rhs(i) += (fe_values.shape_grad(i, q_point)
                                 * coeff
                                 * old_solution_gradients[q_point]
                                 * fe_values.JxW(q_point));
@@ -268,48 +377,15 @@ namespace Step15
 
         cell->get_dof_indices (local_dof_indices);
         hanging_node_constraints
-.distribute_local_to_global (cell_matrix, cell_rhs,
+.distribute_local_to_global (cell_rhs,
                              local_dof_indices,
-                             system_matrix, system_rhs);
+                             system_rhs, cell_matrix);
 
-        // for (unsigned int i=0; i<dofs_per_cell; ++i)
-        //   {
-        //     for (unsigned int j=0; j<dofs_per_cell; ++j)
-        //       system_matrix.add (local_dof_indices[i],
-        //                          local_dof_indices[j],
-        //                          cell_matrix(i,j));
-        //
-        //     system_rhs(local_dof_indices[i]) += cell_rhs(i);
-        //   }
-      }
-//    hanging_node_constraints.condense (system_matrix);
-//    hanging_node_constraints.condense (system_rhs);
-
-system_matrix.compress(VectorOperation::add);
 system_rhs.compress(VectorOperation::add);
 
-    std::map<types::global_dof_index,double> boundary_values;
-    VectorTools::interpolate_boundary_values (dof_handler,
-                                              0,
-                                              ZeroFunction<dim>(),
-                                              boundary_values);
-
-    MatrixTools::apply_boundary_values (boundary_values,
-                                        system_matrix,
-                                        newton_update,
-                                        system_rhs, false);
-
-
-std::cout << "here "<< std::endl;
+//    std::cout << system_rhs.l2_norm() << std::endl;
   }
-
-
-
-
-  template <int dim>
-  void MinimalSurfaceProblem<dim>::solve ()
-  {
-  }
+}
 
 
 
@@ -378,6 +454,7 @@ std::cout << "here "<< std::endl;
   {
     //Vector<double> residual (dof_handler.n_dofs());
     residual = 0.;
+    residual -= system_rhs;//0.;
     hanging_node_constraints.distribute (present_solution);
 
     Vector<double> evaluation_point (dof_handler.n_dofs());
@@ -474,16 +551,17 @@ std::cout << "here "<< std::endl;
 
   ierr = SNESCreate(MPI_COMM_WORLD, &snes);
 
-  ierr = SNESSetFunction(snes, residual, FormFunction, this);
+  //ierr = SNESSetFunction(snes, residual, FormFunction, this);
+  ierr = SNESSetFunction(snes, system_rhs, FormFunction, this);
 
   ierr = SNESSetJacobian(snes, system_matrix, system_matrix, FormJacobian, this);
 
   SNESGetKSP(snes,&ksp);
   KSPGetPC(ksp,&pc);
-  PCSetType(pc,PCNONE);
-  KSPSetTolerances(ksp,1.e-4,PETSC_DEFAULT,PETSC_DEFAULT,20);
+  //PCSetType(pc,PCNONE);
+  //KSPSetTolerances(ksp,1.e-4,PETSC_DEFAULT,PETSC_DEFAULT,20);
   ierr = SNESSetFromOptions(snes);
-
+//assemble_system();
   ierr = SNESSolve(snes, NULL, present_solution);
 
   PetscInt its;
@@ -500,7 +578,7 @@ std::cout << "here "<< std::endl;
 
       data_out.attach_dof_handler (dof_handler);
       data_out.add_data_vector (present_solution, "solution");
-      data_out.add_data_vector (newton_update, "update");
+      //data_out.add_data_vector (newton_update, "update");
       data_out.build_patches ();
       const std::string filename = "solution-" +
                                    Utilities::int_to_string (refinement, 2) +
