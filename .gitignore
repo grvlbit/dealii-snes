@@ -1,4 +1,5 @@
-step15
+CMakeFiles/
+step-15
 *.vtk
 Makefile
 CMakeCache.txt
