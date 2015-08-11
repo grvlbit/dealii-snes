@@ -386,7 +386,7 @@ namespace Step15
     GridGenerator::hyper_ball (triangulation);
     static const HyperBallBoundary<dim> boundary;
     triangulation.set_boundary (0, boundary);
-    triangulation.refine_global(6);
+    triangulation.refine_global(2);
 
     setup_system (true);
     set_boundary_values ();
@@ -433,6 +433,9 @@ int main (int argc,char **argv)
 
       MinimalSurfaceProblem<2> laplace_problem_2d;
       laplace_problem_2d.run ();
+
+    //  MinimalSurfaceProblem<3> laplace_problem_3d;
+    //  laplace_problem_3d.run ();
     }
   catch (std::exception &exc)
     {
